@@ -6,6 +6,9 @@ cd "$PROJECT_DIR"
 
 VER_NUM="4.6"
 
+# Default fallback, если trap вызовется до детекции
+CONTAINER_EXE="docker"
+
 # Bootstrap — dict not yet available
 # Функция очистки при прерывании (Ctrl+C). Вызывается по SIGINT/SIGTERM в любой момент,
 # словарь может быть ещё не загружен — хардкод допустим.
@@ -14,7 +17,7 @@ cleanup_exit() {
     # Stop all running build containers to prevent orphans
     release_locks "ALL"
     # Remove the temporary Docker config
-    rm -rf "$PROJECT_DIR/.docker_tmp" 
+    rm -rf "$PROJECT_DIR/.docker_tmp"
     echo -e "${C_RST}"
     exit 1 # Exit with an error code to indicate abnormal termination
 }
@@ -176,14 +179,45 @@ export DOCKER_BUILDKIT=1
 BUILD_MODE="IMAGE"
 echo -e "$L_INIT_ENV"
 
+# === CONTAINER ENGINE DETECTION (Docker vs Podman) ===
+CONTAINER_EXE=""
+C_EXE=""
+
+if command -v docker >/dev/null 2>&1; then
+    CONTAINER_EXE="docker"
+    if command -v docker-compose >/dev/null 2>&1; then
+        C_EXE="docker-compose"
+    elif docker compose version >/dev/null 2>&1; then
+        C_EXE="docker compose"
+    fi
+elif command -v podman >/dev/null 2>&1; then
+    CONTAINER_EXE="podman"
+    if podman compose version >/dev/null 2>&1; then
+        C_EXE="podman compose"
+    elif command -v podman-compose >/dev/null 2>&1; then
+        C_EXE="podman-compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        C_EXE="docker-compose"
+    elif docker compose version >/dev/null 2>&1; then
+        C_EXE="docker compose"
+    fi
+fi
+
+if [ -z "$CONTAINER_EXE" ] || [ -z "$C_EXE" ]; then
+    echo -e "$L_ERR_DOCKER"
+    echo -e "$L_ERR_DOCKER_MSG"
+    read -p "$L_PRESS_ENTER" && exit 1
+fi
+
 # === ФИКС DOCKER CREDENTIALS ===
 # Копируем реальный конфиг (с proxy/dns настройками), но убираем credsStore
-# чтобы не падала авторизация в безголовых окружениях
-export DOCKER_CONFIG_DIR="$PROJECT_DIR/.docker_tmp"
-mkdir -p "$DOCKER_CONFIG_DIR"
-_REAL_CFG="$HOME/.docker/config.json"
-if [ -f "$_REAL_CFG" ] && command -v python3 &>/dev/null; then
-    python3 -c "
+# чтобы не падала авторизация в безголовых окружениях. Применяется только при использовании Docker.
+if [ "$CONTAINER_EXE" = "docker" ]; then
+    export DOCKER_CONFIG_DIR="$PROJECT_DIR/.docker_tmp"
+    mkdir -p "$DOCKER_CONFIG_DIR"
+    _REAL_CFG="$HOME/.docker/config.json"
+    if [ -f "$_REAL_CFG" ] && command -v python3 &>/dev/null; then
+        python3 -c "
 import json, sys
 with open('$_REAL_CFG') as f:
     cfg = json.load(f)
@@ -191,41 +225,27 @@ cfg.pop('credsStore', None)
 cfg.pop('credHelpers', None)
 print(json.dumps(cfg))
 " > "$DOCKER_CONFIG_DIR/config.json" 2>/dev/null || echo '{"auths":{}}' > "$DOCKER_CONFIG_DIR/config.json"
-else
-    echo '{"auths":{}}' > "$DOCKER_CONFIG_DIR/config.json"
+    else
+        echo '{"auths":{}}' > "$DOCKER_CONFIG_DIR/config.json"
+    fi
+    export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
 fi
-export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
 
 # Предварительный пулл теперь точно сработает
 echo -e "${C_LBL}${L_INIT_PULL}${C_RST}"
 
-# Проверка Docker
-D_VER=$(docker --version 2>/dev/null)
-if [ -z "$D_VER" ]; then
-    echo -e "$L_ERR_DOCKER"
-    echo -e "$L_ERR_DOCKER_MSG"
-    read -p "$L_PRESS_ENTER" && exit 1
-fi
+# Проверка Docker / Podman
+D_VER=$($CONTAINER_EXE --version 2>/dev/null)
 echo -e "  ${C_GRY}-${C_RST} $D_VER"
 
 # Проверка Compose
-C_EXE="docker-compose"
-if ! command -v docker-compose &> /dev/null; then
-    if docker compose version &> /dev/null; then
-        C_EXE="docker compose"
-    else
-        echo -e "$L_ERR_COMPOSE"
-        read -p "$L_PRESS_ENTER" && exit 1
-    fi
-fi
 echo -e "${L_INIT_USING} $C_EXE"
 
 # Корень
-PROJECT_DIR=$(pwd)
 echo -e "  ${C_GRY}-${C_RST} ${L_INIT_ROOT}: ${C_VAL}${PROJECT_DIR}${C_RST}"
 
 echo -e "$L_INIT_NET"
-docker network prune --force >/dev/null 2>&1
+$CONTAINER_EXE network prune --force >/dev/null 2>&1
 echo ""
 
 # === 0. РАСПАКОВКА ===
@@ -249,9 +269,9 @@ build_routine() {
     local conf_file="$1"
     local p_id="${conf_file%.conf}"
     local target_var=""
-    
+
     [[ "$BUILD_MODE" == "IMAGE" ]] && target_var="IMAGEBUILDER_URL" || target_var="SRC_BRANCH"
-    
+
     local target_val=$(grep "$target_var=" "profiles/$conf_file" | cut -d'"' -f2 | tr -d '\r')
     [ -z "$target_val" ] && { echo -e "${C_ERR}[SKIP] $target_var not found${C_RST}"; return; }
 
@@ -270,7 +290,7 @@ build_routine() {
     # [NEW] Поддержка патчей (Sync v4.32)
     check_dir "custom_patches/$p_id"
     export HOST_PATCHES_DIR="./custom_patches/$p_id"
-    
+
     if [ "$BUILD_MODE" == "IMAGE" ]; then
         export HOST_OUTPUT_DIR="./firmware_output/imagebuilder/$p_id"
         export HOST_PKGS_DIR="./custom_packages/$p_id"
@@ -309,7 +329,7 @@ build_routine() {
     fi
 
     # 1. Принудительно удаляем контейнер (чистка хвостов)
-    docker rm -f "${proj_name}-${service}-1" >/dev/null 2>&1
+    $CONTAINER_EXE rm -f "${proj_name}-${service}-1" >/dev/null 2>&1
     # 2. Полный down с удалением анонимных томов (-v)
     $C_EXE -f "$comp_file" -p "$proj_name" down --remove-orphans >/dev/null 2>&1
     # 3. Пауза (важно для Windows/WSL)
@@ -322,8 +342,8 @@ build_routine() {
 
     # === FIX 3: ВОССТАНОВЛЕНИЕ ПРАВ (ext4/Linux) ===
     if [ -d "$HOST_OUTPUT_DIR" ]; then
-        # Используем docker для смены прав, чтобы не требовать sudo от пользователя скрипта
-        docker run --rm -v "$(pwd)/${HOST_OUTPUT_DIR#./}:/work" alpine chown -R $(id -u):$(id -g) /work
+        # Используем docker/podman для смены прав, чтобы не требовать sudo от пользователя скрипта
+        $CONTAINER_EXE run --rm -v "$(pwd)/${HOST_OUTPUT_DIR#./}:/work" alpine chown -R $(id -u):$(id -g) /work
     fi
 
     # 4. [NEW] "Stay in Container" logic (Only for Source Mode)
@@ -361,8 +381,8 @@ build_routine() {
         else
             echo -e "\n${L_BUILD_FATAL}"
         fi
-        
-        echo -e "${C_LBL}[SHELL]${C_RST} ${L_K_STAY}" 
+
+        echo -e "${C_LBL}[SHELL]${C_RST} ${L_K_STAY}"
         read -r stay_choice
         if [[ "$stay_choice" =~ ^[Yy]$ ]]; then
             echo -e "${L_K_ENTER_SHELL}"
@@ -373,7 +393,7 @@ build_routine() {
     fi
 
     # === ВОЗВРАЩАЕМ РЕАЛЬНЫЙ СТАТУС ===
-    return $build_status    
+    return $build_status
 }
 
 # --- Checksum (MD5) — формат как в unpacker ---
@@ -386,9 +406,9 @@ checksum_comment_prefix() {
 add_checksum_to_file() {
     local file="$1"
     [ ! -f "$file" ] && { echo -e "${C_ERR}[SKIP] $file not found${C_RST}"; return 1; }
-    
+
     WAS_CHANGED=0
-    
+
     # 1. Пытаемся извлечь старый хэш (если есть)
     local old_hash
     old_hash=$(grep -oE "checksum:MD5=[0-9a-fA-F]{32}" "$file" 2>/dev/null | tail -1 | cut -d= -f2)
@@ -396,7 +416,7 @@ add_checksum_to_file() {
 
     local staged
     staged=$(mktemp)
-    
+
     # Точная копия логики из _packer.sh и .bat (PowerShell) с помощью awk.
     # Гарантирует правильные окончания строк и решает проблему "прилипания".
     awk '
@@ -435,8 +455,8 @@ add_checksum_to_file() {
     fi
 
     local prefix
-    prefix=$(checksum_comment_prefix "$file")    
-    
+    prefix=$(checksum_comment_prefix "$file")
+
     # Файл теперь гарантированно заканчивается переносом строки (EOL),
     # поэтому printf безопасно начнет запись с новой строки.
     printf '%s checksum:MD5=%s' "$prefix" "$hash" >> "$staged"
@@ -492,7 +512,7 @@ remove_checksum_from_file() {
     [ ! -f "$file" ] && { echo -e "${C_ERR}[SKIP] $file not found${C_RST}"; return 1; }
     local staged
     staged=$(mktemp)
-    
+
     # Тот же AWK скрипт, что и при добавлении, который отрезает хеш и пустые строки с конца
     awk '
     BEGIN { has_cr = 0 }
@@ -524,21 +544,21 @@ remove_checksum_from_file() {
 
 do_checksum_clear() {
     local arg="$1"
-    
+
     # Если аргумент "all" или пустой — очищаем всё (включая распаковщик)
     if [ -z "$arg" ] || [ "$arg" == "all" ]; then
         local unpacker=""
         [ -f "_unpacker.sh" ] && unpacker="_unpacker.sh"
         [ -f "_unpacker.bat" ] && unpacker="_unpacker.bat" # на случай кросс-платформенности
-        
+
         echo -e "${C_LBL}[CHECKSUM CLEAR]${C_RST} Starting global hash clearance..."
         local n=0
-        
+
         # 1. Очищаем сам распаковщик, если он есть
         if [ -n "$unpacker" ]; then
             remove_checksum_from_file "$unpacker" && ((n++))
         fi
-        
+
         # 2. Очищаем все файлы из списка распаковщика
         local files
         files=($(extract_files_from_unpacker))
@@ -547,7 +567,7 @@ do_checksum_clear() {
                 remove_checksum_from_file "$f" && ((n++))
             fi
         done
-        
+
         echo -e "${C_OK}Global clearance done! Processed files: $n${C_RST}"
         return 0
     fi
@@ -559,7 +579,7 @@ do_checksum_clear() {
         echo -e "${C_ERR}$L_CHKSUM_ERR_FILE $target${C_RST}"
         return 1
     fi
-    
+
     remove_checksum_from_file "$target"
     echo -e "${C_OK}[CLEARED]${C_RST} ${C_VAL}$target${C_RST}"
 }
@@ -575,7 +595,7 @@ run_menuconfig() {
     # 1. Определяем версию (Legacy или New)
     local target_val=$(grep "SRC_BRANCH=" "profiles/$conf_file" | cut -d'"' -f2)
     # Строгая проверка Legacy, как в BAT файле
-    local is_legacy=0    
+    local is_legacy=0
     # 1. Проверка URL (ImageBuilder) - ищем паттерн "/XX."
     if [[ "$target_val" == *"/17."* ]] || [[ "$target_val" == *"/18."* ]] || [[ "$target_val" == *"/19."* ]]; then is_legacy=1; fi
     # 2. Проверка веток (Source) - конкретные версии
@@ -633,7 +653,7 @@ else
     echo "[CONFIG] Generating from profile..."
     echo "CONFIG_TARGET_\${SRC_TARGET}=y" > .config
     echo "CONFIG_TARGET_\${SRC_TARGET}_\${SRC_SUBTARGET}=y" >> .config
-    
+
     # [NEW] Smart Device Detection (Sync with Bat v4.32)
     # Check if DEVICE is already set in SRC_EXTRA_CONFIG to avoid conflict
     if echo "\$SRC_EXTRA_CONFIG" | grep -q "CONFIG_TARGET_.*_DEVICE_"; then
@@ -651,8 +671,8 @@ else
         fi
     done
     [ -n "\$ROOTFS_SIZE" ] && echo "CONFIG_TARGET_ROOTFS_PARTSIZE=\$ROOTFS_SIZE" >> .config
-    [ -n "\$KERNEL_SIZE" ] && echo "CONFIG_TARGET_KERNEL_PARTSIZE=\$KERNEL_SIZE" >> .config    
-    
+    [ -n "\$KERNEL_SIZE" ] && echo "CONFIG_TARGET_KERNEL_PARTSIZE=\$KERNEL_SIZE" >> .config
+
     if [ -n "\$SRC_EXTRA_CONFIG" ]; then
         printf "%b\n" "\$SRC_EXTRA_CONFIG" | tr -d '\r' | while IFS= read -r line; do
             [ -n "\$line" ] && echo "\$line" >> .config
@@ -692,36 +712,36 @@ if [[ "\$stay" =~ ^[Yy]$ ]]; then
     /bin/bash
 fi
 EOF
-    
+
     # Даем права на скрипт (важно для Linux/WSL)
     chmod 666 "$out_path/_menuconfig_runner.sh"
 
     # 4. ФАКТИЧЕСКИЙ ЗАПУСК КОНТЕЙНЕРА
     local run_cmd="chown -R build:build /home/build/openwrt && chown build:build /output && tr -d '\r' < /output/_menuconfig_runner.sh > /tmp/r.sh && chmod +x /tmp/r.sh && sudo -E -u build bash /tmp/r.sh"
-    
+
     $C_EXE -f system/docker-compose-src.yaml -p "srcbuild_$p_id" run --rm -it "$service" /bin/bash -c "$run_cmd"
-    
+
     # --- БЛОК ПОСТ-ОБРАБОТКИ КОНФИГУРАЦИИ ---
     if [ -f "$out_path/manual_config" ]; then
         echo -e "\n${C_KEY}${L_SEPARATOR}${C_RST}"
         echo -e "${H_PROF}: ${C_VAL}${conf_file}${C_RST}"
-        
+
         # Генерация метки времени
         ts=$(date +"%Y%m%d_%H%M%S")
-        
+
         read -p "$(echo -e "$L_K_MOVE_ASK: ")" m_apply
-        
+
         if [[ "$m_apply" =~ ^[Yy]$ ]]; then
             echo -e "${L_K_UPDATING_PROFILE} profiles/$conf_file..."
             # Читаем конфиг, убираем \r, экранируем одинарные кавычки для Bash (' -> '\'')
             manual_data=$(cat "$out_path/manual_config" | tr -d '\r' | sed "s/'/'\\\\''/g")
-            
+
             # Формируем новый блок
             new_block="SRC_EXTRA_CONFIG='${manual_data}'"
             export NEW_BLOCK="$new_block"
 
             if grep -q "^SRC_EXTRA_CONFIG=" "profiles/$conf_file"; then
-                # Perl Regex: 
+                # Perl Regex:
                 # 1. Ищем SRC_EXTRA_CONFIG=
                 # 2. (?: ... ) - группа вариантов
                 # 3. (["\x27]).*?\1 - Вариант А: Есть кавычки (двойные или одинарные). Матчим до закрывающей.
@@ -734,7 +754,7 @@ EOF
             echo -e "$L_K_MOVE_OK"
             mv "$out_path/manual_config" "$out_path/applied_config_${ts}.bak"
             echo -e "[INFO] ${L_ARCHIVED_TO} applied_config_${ts}.bak"
-        else            
+        else
             mv "$out_path/manual_config" "$out_path/discarded_config_${ts}.bak"
             echo -e "[INFO] ${L_ARCHIVED_TO} discarded_config_${ts}.bak"
         fi
@@ -743,7 +763,7 @@ EOF
 
     # Очистка временного файла
     rm -f "$out_path/_menuconfig_runner.sh"
-    
+
     # Пауза, чтобы прочитать результат работы скрипта импорта
     echo ""
     read -p "$L_PRESS_ENTER"
@@ -756,10 +776,10 @@ release_locks() {
     if [ "$p_id" == "ALL" ]; then
         # Удаляем все контейнеры, чьи имена начинаются с префиксов build_ или srcbuild_
         # Это покрывает все возможные контейнеры сборки, созданные docker-compose
-        docker ps -aq --filter "name=^build_" --filter "name=^srcbuild_" | xargs -r docker rm -f
+        $CONTAINER_EXE ps -aq --filter "name=^build_" --filter "name=^srcbuild_" | xargs -r $CONTAINER_EXE rm -f
     else
         # Удаляем контейнеры для конкретного профиля, используя оба возможных префикса
-        docker ps -aq --filter "name=^build_${p_id}" --filter "name=^srcbuild_${p_id}" | xargs -r docker rm -f
+        $CONTAINER_EXE ps -aq --filter "name=^build_${p_id}" --filter "name=^srcbuild_${p_id}" | xargs -r $CONTAINER_EXE rm -f
     fi
 }
 
@@ -771,11 +791,11 @@ cleanup_logic() {
 
     if [ "$p_id" == "ALL" ]; then
         # FIX: Ищем тома, заканчивающиеся на _type, независимо от префикса (build_ или srcbuild_)
-        local volumes_to_delete=$(docker volume ls -q | grep -E "_(srcbuild|build)_.*_${type}$")
+        local volumes_to_delete=$($CONTAINER_EXE volume ls -q | grep -E "_(srcbuild|build)_.*_${type}$")
         # Альтернатива, если grep сложный: grep -E ".*_${type}$" (но это опаснее)
-        
+
         if [ -n "$volumes_to_delete" ]; then
-            echo "$volumes_to_delete" | xargs -r docker volume rm
+            echo "$volumes_to_delete" | xargs -r $CONTAINER_EXE volume rm
             echo -e "  ${L_R_OK}"
         else
             echo -e "  ${L_R_NOTHING}"
@@ -784,16 +804,16 @@ cleanup_logic() {
         # FIX: Пробуем удалить оба варианта имени (для Source и Image режимов)
         local vol_src="srcbuild_${p_id}_${type}"
         local vol_img="build_${p_id}_${type}"
-        
+
         # Удаляем srcbuild вариант
-        if docker volume inspect "$vol_src" >/dev/null 2>&1; then
-            docker volume rm "$vol_src" >/dev/null 2>&1
+        if $CONTAINER_EXE volume inspect "$vol_src" >/dev/null 2>&1; then
+            $CONTAINER_EXE volume rm "$vol_src" >/dev/null 2>&1
             echo -e "  ${L_VOL_DEL} '$vol_src'."
         fi
-        
+
         # Удаляем build вариант
-        if docker volume inspect "$vol_img" >/dev/null 2>&1; then
-            docker volume rm "$vol_img" >/dev/null 2>&1
+        if $CONTAINER_EXE volume inspect "$vol_img" >/dev/null 2>&1; then
+            $CONTAINER_EXE volume rm "$vol_img" >/dev/null 2>&1
             echo -e "  ${L_VOL_DEL} '$vol_img'."
         fi
     fi
@@ -856,7 +876,7 @@ cleanup_wizard_cli() {
     local t_choice="$2"
     if [ "$c_choice" == "9" ]; then
         echo -e "\n$L_PRUNE_RUN"
-        docker system prune -f
+        $CONTAINER_EXE system prune -f
         return 0
     fi
     local target_id="ALL"
@@ -899,14 +919,14 @@ cleanup_wizard() {
     fi
     echo -e "\n 9. $L_DOCKER_PRUNE" # <--- Добавлено (было пропущено)
     echo " 0. $L_BACK"
-    
+
     read -p "$L_CHOICE: " c_choice
     [ "$c_choice" == "0" ] && return
-    
+
     # Обработка глобального Prune (пункт 9)
     if [ "$c_choice" == "9" ]; then
         echo -e "\n$L_PRUNE_RUN"
-        docker system prune -f
+        $CONTAINER_EXE system prune -f
         read -p "$L_PRESS_ENTER"
         return
     fi
@@ -914,7 +934,7 @@ cleanup_wizard() {
     # Выбор цели (Профиль или ALL)
     echo -e "\n${L_CLEAN_TYPE}: [1-$count] / [A] ${L_CLEAN_ALL_PROF}"
     read -p "${L_TARGET_PROMPT}: " t_choice
-    
+
     local target_id="ALL"
     if [ "$t_choice" != "A" ] && [ "$t_choice" != "a" ]; then
         if [ -n "${profiles[$t_choice]}" ]; then
@@ -943,13 +963,13 @@ create_perms_script() {
     local p_id=$1
     local dir="custom_files/${p_id}/etc/uci-defaults"
     local target="${dir}/99-permissions.sh"
-    
+
     # Пытаемся создать путь, игнорируя ошибки
     mkdir -p "$dir" 2>/dev/null
-    
+
     # Если файл уже существует - выходим
-    [ -f "$target" ] && return 
-    
+    [ -f "$target" ] && return
+
     # Пишем файл
     cat <<EOF > "$target"
 #!/bin/sh
@@ -1011,7 +1031,7 @@ patch_architectures() {
             local sub=$(grep "SRC_SUBTARGET=" "$p" | cut -d'"' -f2)
             [ -z "$target" ] && target=$(grep "IMAGEBUILDER_URL=" "$p" | sed -n 's|.*/targets/\([^/]*\)/\([^/]*\)/.*|\1|p')
             [ -z "$sub" ] && sub=$(grep "IMAGEBUILDER_URL=" "$p" | sed -n 's|.*/targets/\([^/]*\)/\([^/]*\)/.*|\2|p')
-            
+
             local arch=""
             case "$target" in
                 ramips) arch="mipsel_24kc" ;;
@@ -1035,7 +1055,7 @@ patch_architectures() {
                 layerscape) [[ "$sub" == "64b" ]] && arch="aarch64_generic" || arch="arm_cortex-a7_neon-vfpv4" ;;
                 *64*) arch="aarch64_generic" ;;
             esac
-            
+
             if [ -n "$arch" ]; then
                 echo "SRC_ARCH=\"$arch\"" >> "$p"
                 echo -e "  ${C_OK}${L_INIT_PATCHED}${C_RST} $(basename "$p") -> $arch"
@@ -1349,14 +1369,14 @@ while true; do
         # Очищаем имя от возможных невидимых символов Windows (\r)
         p_id=$(echo "${p_name%.conf}" | tr -d '\r')
         profiles[$count]=$p_name
-        
+
         # --- [БЫСТРАЯ ИНИЦИАЛИЗАЦИЯ] ---
         # Создаем только основные пути один раз, без лишних проверок
         # --- [FORCE INITIALIZATION] ---
-        # --- [FORCE INITIALIZATION] ---        
+        # --- [FORCE INITIALIZATION] ---
         for base in "custom_files" "custom_packages" "src_packages" "custom_patches" "firmware_output/imagebuilder" "firmware_output/sourcebuilder"; do
             target_path="$base/$p_id"
-            
+
             # 1. Если там файл-призрак или мусор - сносим (rm -rf: на WSL/NTFS каталог может быть определён как не-dir)
             if [ -e "$target_path" ] && [ ! -d "$target_path" ]; then
                 rm -rf "$target_path"
@@ -1385,19 +1405,19 @@ while true; do
         this_arch=$(grep "SRC_ARCH=" "$f" | cut -d'"' -f2 | tr -d '\r')
         [ -z "$this_arch" ] && this_arch="--------"
 
-        # Статусы ресурсов (F P S M H)        
+        # Статусы ресурсов (F P S M H)
         st_f="${C_GRY}·${C_RST}"; [ "$(ls -A "custom_files/$p_id" 2>/dev/null)" ] && st_f="${C_GRY}F${C_RST}"
         st_p="${C_GRY}·${C_RST}"; [ "$(ls -A "custom_packages/$p_id" 2>/dev/null)" ] && st_p="${C_KEY}P${C_RST}"
         st_s="${C_GRY}·${C_RST}"; [ "$(ls -A "src_packages/$p_id" 2>/dev/null)" ] && st_s="${C_VAL}S${C_RST}"
         st_m="${C_GRY}·${C_RST}"; [ -f "firmware_output/sourcebuilder/$p_id/manual_config" ] && st_m="${C_ERR}M${C_RST}"
-        
+
         # Индикатор Хуков (H)
         st_h="${C_GRY}·${C_RST}"
         [ -f "custom_files/$p_id/hooks.sh" ] && st_h="${C_LBL}H${C_RST}"
 
         # [NEW] Индикатор Патчей (X)
         st_pt="${C_GRY}·${C_RST}"
-        [ -d "custom_patches/$p_id" ] && [ "$(ls -A "custom_patches/$p_id" 2>/dev/null)" ] && st_pt="${C_GRY}X${C_RST}"        
+        [ -d "custom_patches/$p_id" ] && [ "$(ls -A "custom_patches/$p_id" 2>/dev/null)" ] && st_pt="${C_GRY}X${C_RST}"
 
         # Статусы билдов (OI OS) - Реагируют на ЛЮБЫЕ файлы в любых подпапках
         st_oi="${C_GRY}··${C_RST}"; [ -n "$(find "firmware_output/imagebuilder/$p_id" -type f 2>/dev/null)" ] && st_oi="${C_VAL}OI${C_RST}"
@@ -1481,11 +1501,11 @@ while true; do
     echo -e "    ${C_GRY}────────────────────────────────────────────────────────────────────────────────────────────────────────────${C_RST}"
     echo -e "    ${L_LEGEND_IND}"
     echo -e "    ${C_GRY}${L_LEGEND_TEXT}${C_RST}\n"
-    
-# Убрали %-18s и %-22s. 
+
+# Убрали %-18s и %-22s.
     # После "Собрать ВСЕ" стоит 2 пробела, а после "Обслуживание" — 1. Это выровняет [M] и [W].
     # %-10s для $OPPOSITE_MODE (SOURCE) оставляем, так как английские слова printf считает правильно.
-    
+
     printf "    ${C_LBL}[${C_KEY}A${C_LBL}] %s     ${C_LBL}[${C_KEY}M${C_LBL}] %s ${C_VAL}%s${C_RST}  ${C_LBL}[${C_KEY}E${C_LBL}] %s${C_RST}\n" \
            "$L_BTN_ALL" "$L_BTN_SWITCH" "$OPPOSITE_MODE" "$L_BTN_EDIT"
 
@@ -1505,14 +1525,14 @@ while true; do
     choice="${choice^^}"
 
     case "$choice" in
-        0) 
+        0)
             echo -ne "${C_ERR}${L_EXIT_CONFIRM}${C_RST}"
             read -r exit_confirm
             if [[ -z "$exit_confirm" || "$exit_confirm" =~ ^[Yy]$ ]]; then
                 echo -e "${C_OK}${L_EXIT_BYE}${C_RST}"
                 sleep 3
                 exit 0
-            fi 
+            fi
             continue ;;
         M)
             [[ "$BUILD_MODE" == "IMAGE" ]] && BUILD_MODE="SOURCE" || BUILD_MODE="IMAGE" ;;
@@ -1541,7 +1561,7 @@ while true; do
                 bash "system/apk_scanner.sh" "$sel_id" "$sel_arch" || true
                 echo ""
             fi
-            pause
+            read -p "Press Enter to continue..."
             continue ;;
         E)
             clear
@@ -1558,16 +1578,16 @@ while true; do
             echo -e "  ${C_LBL}[${C_KEY}0${C_LBL}]${C_RST} ${L_BACK}"
             echo ""
             read -p "  ID: " e_choice
-            
+
             if [[ "$e_choice" =~ ^[0-9]+$ ]] && [ "$e_choice" -le "$count" ] && [ "$e_choice" -gt 0 ]; then
                 sel_conf="${profiles[$e_choice]}"
                 sel_id="${sel_conf%.conf}"
-                
+
                 # --- ANALYZER LOGIC ---
                 clear
                 echo -e "${C_VAL}[${L_ANALYSIS}]${C_RST} ${C_KEY}${sel_id}${C_RST}"
                 echo -e "${C_GRY}${L_SEPARATOR}${C_RST}"
-                
+
                 # Определяем статусы (как в BAT)
                 # 1. Custom Files
                 if [ -d "custom_files/$sel_id" ] && [ "$(ls -A "custom_files/$sel_id" 2>/dev/null)" ]; then
@@ -1575,7 +1595,7 @@ while true; do
                 else
                     stat_files="${L_MISSING}"
                 fi
-                
+
                 # 2. Custom Packages (IPK)
                 if [ -d "custom_packages/$sel_id" ] && [ "$(ls -A "custom_packages/$sel_id" 2>/dev/null)" ]; then
                     stat_pkgs="${L_FOUND} ${L_ST_SUFFIX_IPK}"
@@ -1596,7 +1616,7 @@ while true; do
                 else
                     stat_out_s="${L_EMPTY}"
                 fi
-                
+
                 if [ -d "firmware_output/imagebuilder/$sel_id" ] && [ "$(ls -A "firmware_output/imagebuilder/$sel_id" 2>/dev/null)" ]; then
                     stat_out_i="${L_FOUND} ${L_ST_SUFFIX_OUT_I}"
                 else
@@ -1612,13 +1632,13 @@ while true; do
                 echo -e "  - ${L_ST_OUTI}: $stat_out_i"
                 echo -e "${C_GRY}${L_SEPARATOR}${C_RST}"
                 echo ""
-                
+
                 echo -e "${C_VAL}[${L_ACTION}]${C_RST} ${C_VAL}profiles/$sel_conf${C_RST} ${L_IN_EDITOR}"
                 echo -e "${C_LBL}[INFO]${C_RST} Press Ctrl+X to exit nano."
                 sleep 1
-                
+
                 "${EDITOR:-nano}" "profiles/$sel_conf"
-            fi 
+            fi
             ;;
         A)
             # Массовая сборка с параллельным выполнением и логированием
@@ -1626,72 +1646,72 @@ while true; do
                 echo -e "${C_ERR}${L_WARN_MASS}${C_RST}"
                 read -p "$L_PRESS_ENTER"
             fi
-            
+
             LOG_DIR="firmware_output/.build_logs/$(date +%Y%m%d-%H%M%S)"
             mkdir -p "$LOG_DIR"
-            
+
             echo -e "\n${C_VAL}${L_PARALLEL_BUILDS_START}${C_RST} ${C_LBL}$LOG_DIR${C_RST}\n"
-            
+
             pids=()
             # ВАЖНО: Объявляем ассоциативные массивы для имен и ВРЕМЕНИ
             declare -A pid_map
             declare -A start_time_map
-            
+
             printf "    %-65s | %s\n" "${C_GRY}${L_LOG_HEAD_PROF}" "${L_LOG_HEAD_FILE}${C_RST}"
             printf "    %s\n" "${C_GRY}--------------------------------------------------------------------------------------------------------------------${C_RST}"
-            
+
             for p in "${profiles[@]}"; do
                 # Очищаем имя от \r и расширения
                 p_id=$(echo "${p%.conf}" | tr -d '\r')
                 log_file="$LOG_DIR/${p_id}.log"
-                
+
                 printf "    %-65s | %s\n" "${C_KEY}${L_LOG_START} $p_id${C_RST}" "${C_LBL}${log_file}${C_RST}"
-                
+
                 # Запускаем сборку в фоне
                 build_routine "$p" > "$log_file" 2>&1 &
-                
+
                 # Запоминаем PID
                 pid=$!
                 pids+=($pid)
-                
+
                 # Запоминаем Имя и ВРЕМЯ СТАРТА (Unix timestamp)
                 pid_map[$pid]="$p_id"
                 start_time_map[$pid]=$(date +%s)
 
-                # Задержка для Docker Desktop
+                # Задержка для Docker Desktop / Podman
                 sleep 1
             done
-            
+
             echo -e "\n${C_OK}${L_ALL_BUILDS_LAUNCHED}${C_RST}"
             echo -e "${C_LBL}${L_MONITOR_HINT}${C_RST}\n"
-            
+
             running_pids=("${pids[@]}")
             spinner=("/" "-" "\\" "|")
             spin_idx=0
-            
+
             while [ ${#running_pids[@]} -gt 0 ]; do
                 still_running=()
-                
+
                 for pid in "${running_pids[@]}"; do
                     if kill -0 "$pid" 2>/dev/null; then
                         # Процесс жив
                         still_running+=("$pid")
                     else
                         # Процесс завершился
-                        
+
                         # --- РАСЧЕТ ВРЕМЕНИ ---
                         end_ts=$(date +%s)
                         start_ts=${start_time_map[$pid]}
                         duration=$((end_ts - start_ts))
-                        
+
                         # Форматируем в красивый вид (Xm Ys)
                         dm=$((duration / 60))
                         ds=$((duration % 60))
                         time_str="${dm}m ${ds}s"
                         # ----------------------
 
-                        printf "\r%120s\r" " " 
-                        
+                        printf "\r%120s\r" " "
+
                         if ! wait "$pid"; then
                             # ОШИБКА (Показываем время, потраченное впустую)
                             printf "${C_ERR}${L_LOG_FAIL_IN}${C_RST}\n" "${pid_map[$pid]}" "${time_str}"
@@ -1704,7 +1724,7 @@ while true; do
 
                 # Обновляем список живых PID
                 running_pids=("${still_running[@]}")
-                
+
                 # Рисуем спиннер
                 if [ ${#running_pids[@]} -gt 0 ]; then
                     running_names=""
@@ -1714,14 +1734,14 @@ while true; do
                     if [ ${#running_names} -gt 60 ]; then
                         running_names="${running_names:0:57}..."
                     fi
-                    
+
                     printf "\r${C_LBL}[%s]${C_RST} ${L_WAITING_FOR_BUILDS} (%d left): ${C_VAL}%-60s${C_RST}" "${spinner[$spin_idx]}" "${#running_pids[@]}" "$running_names"
                 fi
-                
+
                 sleep 0.5
                 spin_idx=$(( (spin_idx+1) % 4 ))
             done
-            
+
             printf "\r%120s\r" " "
             echo -e "${C_OK}${L_ALL_BUILDS_DONE}${C_RST}"
             read -p "$L_DONE_MENU"
@@ -1739,7 +1759,7 @@ while true; do
                 # Выводим список красиво, с выравниванием и цветами
                 for ((i=1; i<=count; i++)); do
                     printf "  ${C_LBL}[%2d]${C_RST} %s\n" "$i" "${profiles[$i]}"
-                done                
+                done
                 echo ""
                 echo -e "  ${C_GRY}${L_CANCEL_0}${C_RST}"
                 echo ""
@@ -1785,7 +1805,7 @@ while true; do
             else
                 # Важно: здесь тоже должны быть пробелы!
                 [ -n "$choice" ] && echo -e "${C_ERR}${L_ERR_INPUT}${C_RST}" && sleep 1
-            fi 
+            fi
             ;;
     esac
 done

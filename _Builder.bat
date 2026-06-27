@@ -36,6 +36,48 @@ set "C_KEY=%ESC%[93m"
 :: Alias (псевдоним C_VAL): Для успешных операций
 set "C_OK=%C_VAL%"
 
+:: === CONTAINER ENGINE DETECTION (Docker vs Podman) ===
+set "CONTAINER_EXE="
+set "COMPOSE_EXE="
+
+docker --version >nul 2>&1
+if not errorlevel 1 (
+    set "CONTAINER_EXE=docker"
+    docker-compose --version >nul 2>&1
+    if not errorlevel 1 (
+        set "COMPOSE_EXE=docker-compose"
+    ) else (
+        docker compose version >nul 2>&1
+        if not errorlevel 1 (
+            set "COMPOSE_EXE=docker compose"
+        )
+    )
+) else (
+    podman --version >nul 2>&1
+    if not errorlevel 1 (
+        set "CONTAINER_EXE=podman"
+        podman compose version >nul 2>&1
+        if not errorlevel 1 (
+            set "COMPOSE_EXE=podman compose"
+        ) else (
+            podman-compose --version >nul 2>&1
+            if not errorlevel 1 (
+                set "COMPOSE_EXE=podman-compose"
+            ) else (
+                docker-compose --version >nul 2>&1
+                if not errorlevel 1 (
+                    set "COMPOSE_EXE=docker-compose"
+                ) else (
+                    docker compose version >nul 2>&1
+                    if not errorlevel 1 (
+                        set "COMPOSE_EXE=docker compose"
+                    )
+                )
+            )
+        )
+    )
+)
+
 :: === CLI: ключ языка в любой позиции; вырезаем его и собираем эффективный список аргументов ===
 :: Только ключ языка (без других аргументов) = меню с принудительным языком. Иначе = CLI, ключ вырезается.
 set "la1=%~1"
@@ -140,24 +182,32 @@ echo.
 set "BUILD_MODE=IMAGE"
 echo %L_INIT_ENV%
 
-:: Вывод версии Docker
-for /f "tokens=*" %%i in ('docker --version 2^>nul') do set "D_VER=%%i"
-if "%D_VER%"=="" (
+:: Вывод версии Docker / Podman
+if not defined CONTAINER_EXE (
     echo %L_ERR_DOCKER%
     echo %L_ERR_DOCKER_MSG%
     pause & exit /b
 )
+for /f "tokens=*" %%i in ('%CONTAINER_EXE% --version 2^>nul') do set "D_VER=%%i"
 echo   %C_GRY%-%C_RST% !L_INIT_DOCKER_VER!: %C_VAL%%D_VER%%C_RST%
 
 :: Вывод версии Compose
-for /f "tokens=*" %%i in ('docker-compose --version 2^>nul') do set "C_VER=%%i"
+if not defined COMPOSE_EXE (
+    echo %L_ERR_DOCKER%
+    echo %L_ERR_DOCKER_MSG%
+    pause & exit /b
+)
+for /f "tokens=*" %%i in ('%COMPOSE_EXE% --version 2^>nul') do set "C_VER=%%i"
+if "%C_VER%"=="" (
+    for /f "tokens=*" %%i in ('%COMPOSE_EXE% version 2^>nul') do set "C_VER=%%i"
+)
 echo   %C_GRY%-%C_RST% !L_INIT_COMPOSE_VER!: %C_VAL%%C_VER%%C_RST%
 
 :: Вывод корня проекта
 echo   %C_GRY%-%C_RST% !L_INIT_ROOT!: %C_VAL%%CD%%C_RST%
 
 echo %L_INIT_NET%
-docker network prune --force >nul 2>&1
+%CONTAINER_EXE% network prune --force >nul 2>&1
 echo.
 :: === 0. РАСПАКОВКА ===
 if exist _unpacker.bat (
@@ -327,7 +377,7 @@ for %%f in (profiles\*.conf) do (
     set /a count+=1
     set "profile[!count!]=%%~nxf"
     set "p_id=%%~nf"
-    
+
     :: Авто-создание структуры (паритет с _Builder.sh: firmware_output/imagebuilder, firmware_output/sourcebuilder)
     if not exist "custom_files\!p_id!" mkdir "custom_files\!p_id!" >nul
     if not exist "custom_patches\!p_id!" mkdir "custom_patches\!p_id!" >nul
@@ -335,7 +385,7 @@ for %%f in (profiles\*.conf) do (
     if not exist "src_packages\!p_id!" mkdir "src_packages\!p_id!" >nul
     if not exist "firmware_output\imagebuilder\!p_id!" mkdir "firmware_output\imagebuilder\!p_id!" >nul
     if not exist "firmware_output\sourcebuilder\!p_id!" mkdir "firmware_output\sourcebuilder\!p_id!" >nul
-    call :CREATE_PERMS_SCRIPT "!p_id!"    
+    call :CREATE_PERMS_SCRIPT "!p_id!"
     :: Извлекаем имя БЕЗ расширения для отображения в меню
     set "fname_display=%%~nf"
 
@@ -351,7 +401,7 @@ for %%f in (profiles\*.conf) do (
     set "st_f=!C_GRY!·!C_RST!" & dir /a-d /b /s "custom_files\!p_id!" 2>nul | findstr "^" >nul && set "st_f=!C_GRY!F!C_RST!"
     set "st_p=!C_GRY!·!C_RST!" & dir /a-d /b /s "custom_packages\!p_id!" 2>nul | findstr "^" >nul && set "st_p=!C_KEY!P!C_RST!"
     set "st_s=!C_GRY!·!C_RST!" & dir /a-d /b /s "src_packages\!p_id!" 2>nul | findstr "^" >nul && set "st_s=!C_VAL!S!C_RST!"
-    set "st_m=!C_GRY!·!C_RST!" & if exist "firmware_output\sourcebuilder\!p_id!\manual_config" set "st_m=!C_ERR!M!C_RST!"        
+    set "st_m=!C_GRY!·!C_RST!" & if exist "firmware_output\sourcebuilder\!p_id!\manual_config" set "st_m=!C_ERR!M!C_RST!"
     set "st_h=!C_GRY!·!C_RST!" & if exist "custom_files\!p_id!\hooks.sh" set "st_h=!C_LBL!H!C_RST!"
     set "st_pt=!C_GRY!·!C_RST!" & dir /a-d /b /s "custom_patches\!p_id!" 2>nul | findstr "^" >nul && set "st_pt=!C_GRY!X!C_RST!"
 
@@ -360,7 +410,7 @@ for %%f in (profiles\*.conf) do (
     dir /s /a-d /b "firmware_output\imagebuilder\!p_id!\*" 2>nul | findstr "^" >nul && set "st_oi=!C_VAL!OI!C_RST!"
     set "st_os=!C_GRY!··!C_RST!"
     dir /s /a-d /b "firmware_output\sourcebuilder\!p_id!\*" 2>nul | findstr "^" >nul && set "st_os=!C_VAL!OS!C_RST!"
-    
+
     :: ВЫРАВНИВАНИЕ (Сохранено без изменений)
     set "id_pad=!count!"
     if !count! LSS 10 set "id_pad= !count!"
@@ -565,9 +615,9 @@ echo   !C_GRY!💡 Tip: Type !C_KEY!mc!C_GRY! inside to launch Midnight Commande
 
 :: Разделяем логику входа. Для SOURCE полностью имитируем окружение из src_builder.sh
 if "!BUILD_MODE!"=="SOURCE" (
-    docker-compose !COMPOSE_ARG! -p !PROJ_NAME! run --rm -it !SERVICE_NAME! /bin/bash -c "if [ -d /home/build/openwrt/.git ] && [ x$(stat -c %%U /ccache 2>/dev/null) = xbuild ]; then echo '[INIT] Permissions OK'; else echo '[INIT] Fixing permissions...'; chown -R build:build /home/build/openwrt /ccache 2>/dev/null || true; fi && sudo -E -u build bash -c 'export HOME=/home/build; git config --global --add safe.directory \"*\"; cd /home/build/openwrt 2>/dev/null || cd /home/build; exec bash'"
+    %COMPOSE_EXE% !COMPOSE_ARG! -p !PROJ_NAME! run --rm -it !SERVICE_NAME! /bin/bash -c "if [ -d /home/build/openwrt/.git ] && [ x$(stat -c %%U /ccache 2>/dev/null) = xbuild ]; then echo '[INIT] Permissions OK'; else echo '[INIT] Fixing permissions...'; chown -R build:build /home/build/openwrt /ccache 2>/dev/null || true; fi && sudo -E -u build bash -c 'export HOME=/home/build; git config --global --add safe.directory \"*\"; cd /home/build/openwrt 2>/dev/null || cd /home/build; exec bash'"
 ) else (
-    docker-compose !COMPOSE_ARG! -p !PROJ_NAME! run --rm -it !SERVICE_NAME! /bin/bash
+    %COMPOSE_EXE% !COMPOSE_ARG! -p !PROJ_NAME! run --rm -it !SERVICE_NAME! /bin/bash
 )
 
 :EDIT_DONE
@@ -652,7 +702,7 @@ echo.
 echo  %L_SEL_IMPORT%:
 echo.
 for /L %%i in (1,1,%count%) do (
-    set "fname_tmp=!profile[%%i]:.conf=!"    
+    set "fname_tmp=!profile[%%i]:.conf=!"
     echo    %C_LBL%[%C_KEY%%%i%C_LBL%]%C_RST% !fname_tmp!
 )
 echo.
@@ -738,7 +788,7 @@ if "%clean_choice%"=="0" goto MENU
 if "%clean_choice%"=="9" (
     echo.
     echo %L_PRUNE_RUN%
-    docker system prune -f
+    %CONTAINER_EXE% system prune -f
     pause
     goto CLEAN_MENU
 )
@@ -853,7 +903,7 @@ set "FOUND_ANY="
 if "%P_ID%"=="ALL" (
     echo   !L_VOL_SEARCH_ALL! !C_VAL!%V_TAG%!C_RST!
     rem Ищем по регулярному выражению в конце имени
-    for /f "tokens=*" %%v in ('docker volume ls -q ^| findstr /R /C:"_%V_TAG%$"') do (
+    for /f "tokens=*" %%v in ('%CONTAINER_EXE% volume ls -q ^| findstr /R /C:"_%V_TAG%$"') do (
         call :DO_DELETE_VOL "%%v"
         set "FOUND_ANY=1"
     )
@@ -863,7 +913,7 @@ if "%P_ID%"=="ALL" (
     set "patterns=build_%P_ID%_%V_TAG% srcbuild_%P_ID%_%V_TAG%"
     for %%v in (!patterns!) do (
         rem Проверяем, существует ли том, перед попыткой удаления (чтобы не спамить ошибками)
-        docker volume inspect %%v >nul 2>&1
+        %CONTAINER_EXE% volume inspect %%v >nul 2>&1
         if not errorlevel 1 (
             call :DO_DELETE_VOL "%%v"
             set "FOUND_ANY=1"
@@ -880,7 +930,7 @@ exit /b
 set "vol_name=%~1"
 echo   !L_VOL_DEL! !vol_name!
 :: Удаляем без подавления ошибок (2>nul), чтобы видеть причину (Locked/In use)
-docker volume rm !vol_name! >nul
+%CONTAINER_EXE% volume rm !vol_name! >nul
 if not errorlevel 1 (
     echo     - !L_R_OK!
 ) else (
@@ -909,9 +959,9 @@ if "%BUILD_MODE%"=="IMAGE" (
 )
 
 set "c_found="
-for /f "tokens=*" %%c in ('docker ps -aq --filter "!d_filter!"') do (
+for /f "tokens=*" %%c in ('%CONTAINER_EXE% ps -aq --filter "!d_filter!"') do (
     echo   !L_KILL_CONTAINER! %%c
-    docker rm -f %%c
+    %CONTAINER_EXE% rm -f %%c
     set "c_found=1"
 )
 if not defined c_found echo   !L_R_NOTHING!
@@ -930,19 +980,19 @@ if "%BUILD_MODE%"=="IMAGE" (
 )
 
 :: 1. Сначала пробуем штатную остановку через Compose
-docker ps -q --filter "name=%PROJ_NAME%" | findstr "^" >nul
+%CONTAINER_EXE% ps -q --filter "name=%PROJ_NAME%" | findstr "^" >nul
 if not errorlevel 1 (
     echo   !L_SRV_DOWN!
-    docker-compose -f !YAML_FILE! -p !PROJ_NAME! down
+    %COMPOSE_EXE% -f !YAML_FILE! -p !PROJ_NAME! down
 ) else (
     echo   !L_SRV_ALREADY_DOWN!
 )
 
 :: 2. АГРЕССИВНАЯ ЗАЧИСТКА (Fix для "volume is in use")
 :: Ищем любые остатки контейнеров с этим именем, даже если Compose их не видит
-for /f "tokens=*" %%c in ('docker ps -aq --filter "!d_filter!"') do (
+for /f "tokens=*" %%c in ('%CONTAINER_EXE% ps -aq --filter "!d_filter!"') do (
     echo   !L_KILL_ORPHAN! %%c
-    docker rm -f %%c >nul 2>&1
+    %CONTAINER_EXE% rm -f %%c >nul 2>&1
 )
 exit /b
 
@@ -961,7 +1011,7 @@ set "HOST_OUTPUT_DIR=./firmware_output/sourcebuilder/%TARGET_PROFILE_ID%"
 set "PROJ_NAME=srcbuild_%TARGET_PROFILE_ID%"
 
 :: Запускаем make clean с полным выводом в консоль
-docker-compose -f system/docker-compose-src.yaml -p %PROJ_NAME% run --rm builder-src-openwrt /bin/bash -c "cd /home/build/openwrt && if [ -f Makefile ]; then echo '[CMD] make clean'; make clean; echo '[DONE] Clean Completed'; else echo '[WARN] Makefile not found'; fi"
+%COMPOSE_EXE% -f system/docker-compose-src.yaml -p %PROJ_NAME% run --rm builder-src-openwrt /bin/bash -c "cd /home/build/openwrt && if [ -f Makefile ]; then echo '[CMD] make clean'; make clean; echo '[DONE] Clean Completed'; else echo '[WARN] Makefile not found'; fi"
 echo.
 pause
 if defined CLI_CLEAN_YES exit /b 0
@@ -1005,7 +1055,7 @@ set "HOST_OUTPUT_DIR=./firmware_output/sourcebuilder/%TARGET_PROFILE_ID%"
 set "PROJ_NAME=srcbuild_%TARGET_PROFILE_ID%"
 
 :: Запускаем удаление tmp внутри контейнера
-docker-compose -f system/docker-compose-src.yaml -p %PROJ_NAME% run --rm builder-src-openwrt /bin/bash -c "cd /home/build/openwrt && echo '[CMD] rm -rf tmp/' && rm -rf tmp/ && echo '[DONE] Index/Tmp cleaned'"
+%COMPOSE_EXE% -f system/docker-compose-src.yaml -p %PROJ_NAME% run --rm builder-src-openwrt /bin/bash -c "cd /home/build/openwrt && echo '[CMD] rm -rf tmp/' && rm -rf tmp/ && echo '[DONE] Index/Tmp cleaned'"
 echo.
 pause
 if defined CLI_CLEAN_YES exit /b 0
@@ -1021,7 +1071,7 @@ if not "%TARGET_PROFILE_ID%"=="ALL" (
 
     echo   !L_SRV_DOWN! (Full)...
     rem Показываем процесс удаления сетей и томов
-    docker-compose -f system/docker-compose-src.yaml -p !PROJ_NAME! down -v
+    %COMPOSE_EXE% -f system/docker-compose-src.yaml -p !PROJ_NAME! down -v
 ) else (
     call :HELPER_RELEASE_LOCKS "ALL"
 )
@@ -1060,9 +1110,9 @@ if not "%TARGET_PROFILE_ID%"=="ALL" (
     set "SELECTED_CONF=dummy"
     set "HOST_FILES_DIR=./custom_files"
     set "HOST_OUTPUT_DIR=./firmware_output"
-    
+
     echo   !L_SRV_DOWN! (Full)...
-    docker-compose -f system/docker-compose.yaml -p !PROJ_NAME! down -v
+    %COMPOSE_EXE% -f system/docker-compose.yaml -p !PROJ_NAME! down -v
 ) else (
     call :HELPER_RELEASE_LOCKS "ALL"
 )
@@ -1427,7 +1477,7 @@ if not defined CLI_ARG1 goto CLEAN_MENU
 set "clean_choice=!CLI_ARG1!"
 if "!clean_choice!"=="9" (
     echo !L_PRUNE_RUN!
-    docker system prune -f
+    %CONTAINER_EXE% system prune -f
     exit /b 0
 )
 if not defined CLI_ARG2 goto CLEAN_MENU
@@ -1692,22 +1742,22 @@ echo fi >> "%RUNNER_SCRIPT%"
 echo %L_K_LAUNCH%
 echo.
 :: FIX: Smart Chown (оптимизация запуска) + Security Opt
-set "HOST_PKGS_DIR=./src_packages/%PROFILE_ID%" && docker-compose -f system/docker-compose-src.yaml -p %PROJ_NAME% run --build --rm -it %SERVICE_NAME% /bin/bash -c "if [ -d /home/build/openwrt/.git ] && [ x$(stat -c %%U /ccache 2>/dev/null) = xbuild ]; then echo '[INIT] Permissions OK'; else echo '[INIT] Fixing permissions (Slow)...'; chown -R build:build /home/build/openwrt /ccache; fi && chown build:build /output && tr -d '\r' < /output/_menuconfig_runner.sh > /tmp/r.sh && chmod +x /tmp/r.sh && sudo -E -u build bash /tmp/r.sh"
+set "HOST_PKGS_DIR=./src_packages/%PROFILE_ID%" && %COMPOSE_EXE% -f system/docker-compose-src.yaml -p %PROJ_NAME% run --build --rm -it %SERVICE_NAME% /bin/bash -c "if [ -d /home/build/openwrt/.git ] && [ x$(stat -c %%U /ccache 2>/dev/null) = xbuild ]; then echo '[INIT] Permissions OK'; else echo '[INIT] Fixing permissions (Slow)...'; chown -R build:build /home/build/openwrt /ccache; fi && chown build:build /output && tr -d '\r' < /output/_menuconfig_runner.sh > /tmp/r.sh && chmod +x /tmp/r.sh && sudo -E -u build bash /tmp/r.sh"
 :: --- БЛОК ПОСТ-ОБРАБОТКИ КОНФИГУРАЦИИ ---
 if exist "%WIN_OUT_PATH%\manual_config" (
     echo.
     echo %C_KEY%!L_SEPARATOR!%C_RST%
-    
+
     :: Получаем метку времени
     for /f "usebackq" %%a in (`powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd_HHmmss'"`) do set "ts=%%a"
-    
+
     :: Выводим информацию о целевом файле
     echo !L_K_SYNC_TGT! %C_VAL%%CONF_FILE%%C_RST%
-    
+
     set "m_apply=Y"
     :: Используем переменную вопроса из словаря напрямую
     set /p "m_apply=%L_K_MOVE_ASK%: "
-    
+
     if /i "!m_apply!"=="Y" (
         echo !L_K_SYNC!
         powershell -NoProfile -Command "$p='profiles\%CONF_FILE%'; $m='%WIN_OUT_PATH%\manual_config'; $n=Get-Content $m | Where-Object {$_.Trim() -ne ''} | ForEach-Object { $_.Trim() -replace [char]39, ([char]39+[char]92+[char]39+[char]39) }; if ($n) { $old=Get-Content $p -Raw; $v='SRC_EXTRA_CONFIG=' + [char]39 + ($n -join [char]10) + [char]39; $q=[char]39 + '|' + [char]34; $reg='(?ms)SRC_EXTRA_CONFIG\s*=\s*(' + $q + ').*?\1'; if ($old -match $reg) { $f=$old -replace $reg, $v } elseif ($old -match 'SRC_EXTRA_CONFIG=') { $f=$old -replace '(?ms)SRC_EXTRA_CONFIG=.*', $v } else { $f=$old.Trim() + [char]13 + [char]10 + [char]13 + [char]10 + $v + [char]13 + [char]10 }; [IO.File]::WriteAllText($p, $f, [System.Text.UTF8Encoding]::new($false)) }" && echo !L_K_MOVE_OK!
@@ -1820,7 +1870,7 @@ if "%BUILD_MODE%"=="IMAGE" (
 
 :: 4. ЗАПУСК (Используем уже вычисленные переменные путей)
 :: Запуск в отдельном окне (с поддержкой интерактивного входа для SOURCE режима и обновления профиля)
-START "%WINDOW_TITLE%" cmd /v:on /c ^"set "SELECTED_CONF=%CONF_FILE%" ^&^& set "HOST_FILES_DIR=./custom_files/%PROFILE_ID%" ^&^& set "HOST_PKGS_DIR=%HOST_PKGS_DIR%" ^&^& set "HOST_PATCHES_DIR=%HOST_PATCHES_DIR%" ^&^& set "HOST_OUTPUT_DIR=%REL_OUT_PATH%" ^&^& (docker-compose %COMPOSE_ARG% -p %PROJ_NAME% up --build --force-recreate --remove-orphans %SERVICE_NAME% ^|^| echo !L_BUILD_FATAL!) ^&^& echo. ^&^& echo !L_FINISHED! ^&^& (if "%BUILD_MODE%"=="SOURCE" ( powershell -NoProfile -ExecutionPolicy Bypass -Command "$out='%REL_OUT_PATH%'; $conf='!SELECTED_CONF!'; Write-Host '--- DEBUG INFO ---' -ForegroundColor Yellow; if([string]::IsNullOrWhiteSpace($out)){ $out='./firmware_output/sourcebuilder/%PROFILE_ID%' }; Write-Host ('[DEBUG] Output Dir: ' + $out); $cleanOut = $out.Replace('./',''); if(Test-Path $cleanOut){ $files = Get-ChildItem -Path $cleanOut -Filter '*imagebuilder*.tar.zst' -Recurse; Write-Host ('[DEBUG] Files found: ' + $files.Count); $best = $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if($best){ $u = (Resolve-Path -Path $best.FullName -Relative).Replace('.\','').Replace('\','/'); Write-Host ('[DEBUG] Found IB: ' + $u) -ForegroundColor Yellow; Write-Host ''; Write-Host '!L_IB_UPDATE_ASK!' -ForegroundColor Cyan; $r = Read-Host '!L_IB_UPDATE_PROMPT!'; if($r -eq 'y'){ $pf='profiles/' + $conf; if(Test-Path $pf){ $lines = Get-Content $pf -Encoding UTF8; $newLine = 'IMAGEBUILDER_URL=' + [char]34 + $u + [char]34; $activeIndex = $null; $commentIndex = $null; for ($i = 0; $i -lt $lines.Count; $i++) { $trimmed = $lines[$i].Trim(); if ($trimmed -like 'IMAGEBUILDER_URL=*') { $activeIndex = $i } elseif ($trimmed -like '#*IMAGEBUILDER_URL=*') { $commentIndex = $i } }; if ($activeIndex -ne $null) { $lines[$activeIndex] = '#' + $lines[$activeIndex]; $lines = $lines[0..$activeIndex] + $newLine + $lines[($activeIndex+1)..($lines.Count-1)] } elseif ($commentIndex -ne $null) { $lines += $newLine } else { $lines += $newLine }; [System.IO.File]::WriteAllLines($pf, $lines, [System.Text.UTF8Encoding]::new($false)); Write-Host '!L_IB_UPDATE_OK!' -ForegroundColor Green } } } else { Write-Host '[DEBUG] Archive *imagebuilder*.tar.zst not found in folder.' -ForegroundColor Red } } else { Write-Host ('[DEBUG] Directory not found: ' + $cleanOut) -ForegroundColor Red }; Write-Host '------------------' -ForegroundColor Yellow " ) ) ^&^& (if "%BUILD_MODE%"=="SOURCE" ( powershell -NoProfile -Command "$Host.UI.RawUI.FlushInputBuffer()" ) ) ^&^& (if "%BUILD_MODE%"=="SOURCE" (set /p "stay=!L_K_STAY! " ^& if /i "^!stay^!"=="y" (echo. ^& echo !L_K_SHELL_H1! ^& echo !L_K_SHELL_H2! ^& echo !L_K_SHELL_H3! ^& docker-compose %COMPOSE_ARG% -p %PROJ_NAME% run --rm -it %SERVICE_NAME% /bin/bash))) ^&^& pause ^"
+START "%WINDOW_TITLE%" cmd /v:on /c ^"set "SELECTED_CONF=%CONF_FILE%" ^&^& set "HOST_FILES_DIR=./custom_files/%PROFILE_ID%" ^&^& set "HOST_PKGS_DIR=%HOST_PKGS_DIR%" ^&^& set "HOST_PATCHES_DIR=%HOST_PATCHES_DIR%" ^&^& set "HOST_OUTPUT_DIR=%REL_OUT_PATH%" ^&^& (%COMPOSE_EXE% %COMPOSE_ARG% -p %PROJ_NAME% up --build --force-recreate --remove-orphans %SERVICE_NAME% ^|^| echo !L_BUILD_FATAL!) ^&^& echo. ^&^& echo !L_FINISHED! ^&^& (if "%BUILD_MODE%"=="SOURCE" ( powershell -NoProfile -ExecutionPolicy Bypass -Command "$out='%REL_OUT_PATH%'; $conf='!SELECTED_CONF!'; Write-Host '--- DEBUG INFO ---' -ForegroundColor Yellow; if([string]::IsNullOrWhiteSpace($out)){ $out='./firmware_output/sourcebuilder/%PROFILE_ID%' }; Write-Host ('[DEBUG] Output Dir: ' + $out); $cleanOut = $out.Replace('./',''); if(Test-Path $cleanOut){ $files = Get-ChildItem -Path $cleanOut -Filter '*imagebuilder*.tar.zst' -Recurse; Write-Host ('[DEBUG] Files found: ' + $files.Count); $best = $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if($best){ $u = (Resolve-Path -Path $best.FullName -Relative).Replace('.\','').Replace('\','/'); Write-Host ('[DEBUG] Found IB: ' + $u) -ForegroundColor Yellow; Write-Host ''; Write-Host '!L_IB_UPDATE_ASK!' -ForegroundColor Cyan; $r = Read-Host '!L_IB_UPDATE_PROMPT!'; if($r -eq 'y'){ $pf='profiles/' + $conf; if(Test-Path $pf){ $lines = Get-Content $pf -Encoding UTF8; $newLine = 'IMAGEBUILDER_URL=' + [char]34 + $u + [char]34; $activeIndex = $null; $commentIndex = $null; for ($i = 0; $i -lt $lines.Count; $i++) { $trimmed = $lines[$i].Trim(); if ($trimmed -like 'IMAGEBUILDER_URL=*') { $activeIndex = $i } elseif ($trimmed -like '#*IMAGEBUILDER_URL=*') { $commentIndex = $i } }; if ($activeIndex -ne $null) { $lines[$activeIndex] = '#' + $lines[$activeIndex]; $lines = $lines[0..$activeIndex] + $newLine + $lines[($activeIndex+1)..($lines.Count-1)] } elseif ($commentIndex -ne $null) { $lines += $newLine } else { $lines += $newLine }; [System.IO.File]::WriteAllLines($pf, $lines, [System.Text.UTF8Encoding]::new($false)); Write-Host '!L_IB_UPDATE_OK!' -ForegroundColor Green } } } else { Write-Host '[DEBUG] Archive *imagebuilder*.tar.zst not found in folder.' -ForegroundColor Red } } else { Write-Host ('[DEBUG] Directory not found: ' + $cleanOut) -ForegroundColor Red }; Write-Host '------------------' -ForegroundColor Yellow " ) ) ^&^& (if "%BUILD_MODE%"=="SOURCE" ( powershell -NoProfile -Command "$Host.UI.RawUI.FlushInputBuffer()" ) ) ^&^& (if "%BUILD_MODE%"=="SOURCE" (set /p "stay=!L_K_STAY! " ^& if /i "^!stay^!"=="y" (echo. ^& echo !L_K_SHELL_H1! ^& echo !L_K_SHELL_H2! ^& echo !L_K_SHELL_H3! ^& %COMPOSE_EXE% %COMPOSE_ARG% -p %PROJ_NAME% run --rm -it %SERVICE_NAME% /bin/bash))) ^&^& pause ^"
 exit /b
 
 :: =========================================================
